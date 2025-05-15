@@ -6,13 +6,37 @@ const OpenAIAssistantDebugger = () => {
   const formatTime = (timestamp) => {
     if (!timestamp) return 'N/A';
     const date = new Date(timestamp);
-    return date.toLocaleTimeString() + '.' + date.getMilliseconds().toString().padStart(3, '0');
+    // Remove .000 if milliseconds are zero
+    const milliseconds = date.getMilliseconds();
+    if (milliseconds === 0) {
+      return date.toLocaleTimeString();
+    }
+    return date.toLocaleTimeString() + '.' + milliseconds.toString().padStart(3, '0');
   };
 
   const formatDuration = (ms) => {
     if (!ms || isNaN(ms)) return 'N/A';
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(2)}s`;
+    
+    // Format as milliseconds for very short durations
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    
+    // Convert to seconds
+    const totalSeconds = ms / 1000;
+    
+    // Format as seconds if less than 60 seconds
+    if (totalSeconds < 60) {
+      // Remove decimal for whole seconds
+      return `${Math.floor(totalSeconds) === totalSeconds ? 
+        Math.floor(totalSeconds) : 
+        totalSeconds.toFixed(1)}s`;
+    }
+    
+    // Format as minutes and seconds for longer durations
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = Math.round(totalSeconds % 60);
+    
+    // Only include seconds if they're non-zero
+    return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
   };
 
   // Create D3 Waterfall Timeline component
@@ -61,7 +85,10 @@ const OpenAIAssistantDebugger = () => {
         .call(d3.axisLeft(y))
         .selectAll(".tick text")
         .style("font-size", "12px")
-        .attr("fill", "#333");
+        .attr("fill", d => {
+          const dataItem = data.find(item => item.name === d);
+          return dataItem && dataItem.isGap ? "#999" : "#333";
+        });
       
       // Create a tooltip
       const tooltip = d3.select(tooltipRef.current)
@@ -85,10 +112,15 @@ const OpenAIAssistantDebugger = () => {
         .attr("height", y.bandwidth())
         .attr("rx", 4)
         .attr("ry", 4)
-        .attr("fill", d => d.isSelected ? "#ff0000" : colorScale(d.index))
-        .style("cursor", "pointer")
+        .attr("fill", d => {
+          if (d.isGap) return "#e0e0e0";
+          return d.isSelected ? "#ff0000" : colorScale(d.index);
+        })
+        .style("cursor", d => d.isGap ? "default" : "pointer")
+        .style("stroke", d => d.isGap ? "#ccc" : "none")
+        .style("stroke-dasharray", d => d.isGap ? "3,2" : "none")
         .on("click", (event, d) => {
-          onStepClick(d.index);
+          if (!d.isGap) onStepClick(d.index);
         })
         .on("mouseover", (event, d) => {
           tooltip.transition()
@@ -96,7 +128,7 @@ const OpenAIAssistantDebugger = () => {
             .style("opacity", 0.9);
           tooltip.html(`
             <div>
-              <p class="font-semibold">${d.name}</p>
+              <p class="font-semibold">${d.isGap ? "Gap" : d.name}</p>
               <p>Start: ${formatDuration(d.actualStart)}</p>
               <p>End: ${formatDuration(d.actualEnd)}</p>
               <p>Duration: ${formatDuration(d.duration)}</p>
@@ -121,7 +153,7 @@ const OpenAIAssistantDebugger = () => {
         .attr("y", d => y(d.name) + y.bandwidth() / 2)
         .attr("text-anchor", "middle")
         .attr("dominant-baseline", "middle")
-        .attr("fill", "white")
+        .attr("fill", d => d.isGap ? "#666" : "white")
         .attr("font-weight", "bold")
         .attr("font-size", "12px")
         .style("pointer-events", "none") // Make sure labels don't interfere with clicks
@@ -170,25 +202,81 @@ const OpenAIAssistantDebugger = () => {
     if (!runData || !runData.steps || runData.steps.length === 0) return [];
     
     const startTime = runData.started_at;
-    const totalDuration = runData.completed_at - startTime;
+    const endTime = runData.completed_at;
+    const result = [];
     
-    // For waterfall style chart, with accurate timing
-    return runData.steps.map((step, index) => {
-      // Calculate the actual relative start and end times from run start
+    // Check for initial gap between run start and first step
+    if (runData.steps.length > 0) {
+      const firstStep = runData.steps[0];
+      if (firstStep.started_at > startTime) {
+        const gapDuration = firstStep.started_at - startTime;
+        result.push({
+          name: `<unknown>`,
+          actualStart: 0,
+          duration: gapDuration,
+          actualEnd: gapDuration,
+          index: -1, // Special index for gaps
+          isGap: true,
+          durationLabel: formatDuration(gapDuration)
+        });
+      }
+    }
+    
+    // Process all steps and add gaps between them
+    runData.steps.forEach((step, index) => {
+      // Add the current step
       const actualStart = step.started_at - startTime;
-      const actualEnd = step.completed_at ? step.completed_at - startTime : totalDuration;
+      const actualEnd = step.completed_at ? step.completed_at - startTime : (endTime - startTime);
       const duration = actualEnd - actualStart;
       
-      return {
+      result.push({
         name: `${index + 1}. ${step.type || 'Unknown'}`,
         actualStart,
         duration,
         actualEnd,
         index,
         isSelected: selectedStepIndex === index,
+        isGap: false,
         durationLabel: formatDuration(duration)
-      };
+      });
+      
+      // Check for gap after this step
+      const nextStep = index < runData.steps.length - 1 ? runData.steps[index + 1] : null;
+      if (nextStep && step.completed_at < nextStep.started_at) {
+        const gapStart = step.completed_at - startTime;
+        const gapEnd = nextStep.started_at - startTime;
+        const gapDuration = gapEnd - gapStart;
+        
+        result.push({
+          name: `<unknown>`,
+          actualStart: gapStart,
+          duration: gapDuration,
+          actualEnd: gapEnd,
+          index: -1, // Special index for gaps
+          isGap: true,
+          durationLabel: formatDuration(gapDuration)
+        });
+      }
     });
+    
+    // Check for gap after the last step to the end of the run
+    const lastStep = runData.steps[runData.steps.length - 1];
+    if (lastStep && lastStep.completed_at < endTime) {
+      const gapStart = lastStep.completed_at - startTime;
+      const gapDuration = endTime - lastStep.completed_at;
+      
+      result.push({
+        name: `<unknown>`,
+        actualStart: gapStart,
+        duration: gapDuration,
+        actualEnd: endTime - startTime,
+        index: -1, // Special index for gaps
+        isGap: true,
+        durationLabel: formatDuration(gapDuration)
+      });
+    }
+    
+    return result;
   };
 
   const fetchRunData = async () => {
@@ -361,21 +449,6 @@ const OpenAIAssistantDebugger = () => {
   };
 
   const timelineData = prepareTimelineData();
-
-  const CustomTooltip = ({ active, payload }) => {
-    if (active && payload && payload.length) {
-      const data = payload[0].payload;
-      return (
-        <div className="bg-white p-2 border border-gray-300 rounded shadow-md">
-          <p className="font-semibold">{data.name}</p>
-          <p>Start: {formatDuration(data.actualStart)}</p>
-          <p>End: {formatDuration(data.actualEnd)}</p>
-          <p>Duration: {formatDuration(data.duration)}</p>
-        </div>
-      );
-    }
-    return null;
-  };
 
   // Helper function to safely render step details
   const renderStepDetails = (step) => {
