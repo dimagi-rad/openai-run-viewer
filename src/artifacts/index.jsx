@@ -1,7 +1,149 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import * as d3 from 'd3';
 
 const OpenAIAssistantDebugger = () => {
+  // Format functions - defined at the very top
+  const formatTime = (timestamp) => {
+    if (!timestamp) return 'N/A';
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString() + '.' + date.getMilliseconds().toString().padStart(3, '0');
+  };
+
+  const formatDuration = (ms) => {
+    if (!ms || isNaN(ms)) return 'N/A';
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(2)}s`;
+  };
+
+  // Create D3 Waterfall Timeline component
+  const WaterfallTimeline = ({ data, runStart, runEnd, onStepClick }) => {
+    const svgRef = useRef();
+    const tooltipRef = useRef();
+    
+    useEffect(() => {
+      if (!data || data.length === 0) return;
+      
+      // Clear any existing SVG content
+      d3.select(svgRef.current).selectAll("*").remove();
+      
+      // Set up dimensions and margins
+      const margin = { top: 20, right: 40, bottom: 30, left: 160 };
+      const width = svgRef.current.clientWidth - margin.left - margin.right;
+      const height = data.length * 40; // Height depends on number of steps
+      
+      // Create the SVG container
+      const svg = d3.select(svgRef.current)
+        .attr("width", width + margin.left + margin.right)
+        .attr("height", height + margin.top + margin.bottom)
+        .append("g")
+        .attr("transform", `translate(${margin.left},${margin.top})`);
+      
+      // Set up scales
+      const x = d3.scaleLinear()
+        .domain([0, runEnd - runStart])
+        .range([0, width]);
+      
+      const y = d3.scaleBand()
+        .domain(data.map(d => d.name))
+        .range([0, height])
+        .padding(0.3);
+      
+      // Add X axis
+      svg.append("g")
+        .attr("transform", `translate(0,${height})`)
+        .call(d3.axisBottom(x)
+          .tickFormat(d => formatDuration(d))
+          .ticks(5)
+        );
+      
+      // Add Y axis
+      svg.append("g")
+        .call(d3.axisLeft(y))
+        .selectAll(".tick text")
+        .style("font-size", "12px")
+        .attr("fill", "#333");
+      
+      // Create a tooltip
+      const tooltip = d3.select(tooltipRef.current)
+        .style("opacity", 0)
+        .attr("class", "bg-white p-2 border border-gray-300 rounded shadow-md absolute pointer-events-none z-50");
+      
+      // Color scale
+      const colorScale = d3.scaleOrdinal()
+        .domain(data.map(d => d.index))
+        .range(['#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088fe']);
+      
+      // Add bars
+      svg.selectAll(".bar")
+        .data(data)
+        .enter()
+        .append("rect")
+        .attr("class", "bar")
+        .attr("y", d => y(d.name))
+        .attr("x", d => x(d.actualStart))
+        .attr("width", d => Math.max(x(d.duration), 1)) // Ensure at least 1px width
+        .attr("height", y.bandwidth())
+        .attr("rx", 4)
+        .attr("ry", 4)
+        .attr("fill", d => d.isSelected ? "#ff0000" : colorScale(d.index))
+        .style("cursor", "pointer")
+        .on("click", (event, d) => {
+          onStepClick(d.index);
+        })
+        .on("mouseover", (event, d) => {
+          tooltip.transition()
+            .duration(200)
+            .style("opacity", 0.9);
+          tooltip.html(`
+            <div>
+              <p class="font-semibold">${d.name}</p>
+              <p>Start: ${formatDuration(d.actualStart)}</p>
+              <p>End: ${formatDuration(d.actualEnd)}</p>
+              <p>Duration: ${formatDuration(d.duration)}</p>
+            </div>
+          `)
+            .style("left", (event.pageX + 10) + "px")
+            .style("top", (event.pageY - 28) + "px");
+        })
+        .on("mouseout", () => {
+          tooltip.transition()
+            .duration(500)
+            .style("opacity", 0);
+        });
+      
+      // Add duration labels inside bars
+      svg.selectAll(".label")
+        .data(data)
+        .enter()
+        .append("text")
+        .attr("class", "label")
+        .attr("x", d => x(d.actualStart) + x(d.duration) / 2)
+        .attr("y", d => y(d.name) + y.bandwidth() / 2)
+        .attr("text-anchor", "middle")
+        .attr("dominant-baseline", "middle")
+        .attr("fill", "white")
+        .attr("font-weight", "bold")
+        .attr("font-size", "12px")
+        .style("pointer-events", "none") // Make sure labels don't interfere with clicks
+        .text(d => x(d.duration) > 35 ? formatDuration(d.duration) : "")
+        .each(function(d) {
+          // Check if text width exceeds bar width and hide if necessary
+          const textWidth = this.getComputedTextLength();
+          if (textWidth > x(d.duration) - 10) {
+            d3.select(this).text("");
+          }
+        });
+        
+    }, [data, runStart, runEnd, onStepClick]);
+    
+    return (
+      <div className="relative w-full h-full">
+        <svg ref={svgRef} className="w-full h-full" />
+        <div ref={tooltipRef} />
+      </div>
+    );
+  };
+
   const [runId, setRunId] = useState(() => localStorage.getItem('openai_debug_run_id') || '');
   const [threadId, setThreadId] = useState(() => localStorage.getItem('openai_debug_thread_id') || '');
   const [assistantId, setAssistantId] = useState(() => localStorage.getItem('openai_debug_assistant_id') || '');
@@ -15,19 +157,6 @@ const OpenAIAssistantDebugger = () => {
   
   const stepRefs = useRef({});
 
-  // Format functions
-  const formatTime = (timestamp) => {
-    if (!timestamp) return 'N/A';
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString() + '.' + date.getMilliseconds().toString().padStart(3, '0');
-  };
-
-  const formatDuration = (ms) => {
-    if (!ms || isNaN(ms)) return 'N/A';
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(2)}s`;
-  };
-
   // Save values to localStorage when they change
   useEffect(() => {
     if (runId) localStorage.setItem('openai_debug_run_id', runId);
@@ -36,6 +165,31 @@ const OpenAIAssistantDebugger = () => {
     if (apiKey) localStorage.setItem('openai_debug_api_key', apiKey);
     localStorage.setItem('openai_debug_mode', debugMode);
   }, [runId, threadId, assistantId, apiKey, debugMode]);
+
+  const prepareTimelineData = () => {
+    if (!runData || !runData.steps || runData.steps.length === 0) return [];
+    
+    const startTime = runData.started_at;
+    const totalDuration = runData.completed_at - startTime;
+    
+    // For waterfall style chart, with accurate timing
+    return runData.steps.map((step, index) => {
+      // Calculate the actual relative start and end times from run start
+      const actualStart = step.started_at - startTime;
+      const actualEnd = step.completed_at ? step.completed_at - startTime : totalDuration;
+      const duration = actualEnd - actualStart;
+      
+      return {
+        name: `${index + 1}. ${step.type || 'Unknown'}`,
+        actualStart,
+        duration,
+        actualEnd,
+        index,
+        isSelected: selectedStepIndex === index,
+        durationLabel: formatDuration(duration)
+      };
+    });
+  };
 
   const fetchRunData = async () => {
     if (!runId || !threadId || !apiKey) {
@@ -206,39 +360,7 @@ const OpenAIAssistantDebugger = () => {
     }
   };
 
-  const prepareTimelineData = () => {
-    if (!runData || !runData.steps || runData.steps.length === 0) return [];
-    
-    const startTime = runData.started_at;
-    const totalDuration = runData.completed_at - startTime;
-    
-    // For waterfall style chart, with accurate timing
-    return runData.steps.map((step, index) => {
-      // Calculate the actual relative start and end times from run start
-      const actualStart = step.started_at - startTime;
-      const actualEnd = step.completed_at ? step.completed_at - startTime : totalDuration;
-      const duration = actualEnd - actualStart;
-      
-      return {
-        name: `${index + 1}. ${step.type || 'Unknown'}`,
-        actualStart,
-        duration,
-        actualEnd,
-        index,
-        durationLabel: formatDuration(duration)
-      };
-    });
-  };
-
   const timelineData = prepareTimelineData();
-  
-  const getBarColor = (index) => {
-    const colors = ['#8884d8', '#82ca9d', '#ffc658', '#ff8042', '#0088fe'];
-    if (selectedStepIndex === index) {
-      return '#ff0000'; // Highlight selected step
-    }
-    return colors[index % colors.length];
-  };
 
   const CustomTooltip = ({ active, payload }) => {
     if (active && payload && payload.length) {
@@ -525,69 +647,12 @@ const OpenAIAssistantDebugger = () => {
           
           {/* Timeline panel - keep this fixed at the top */}
           <div className="h-64 bg-white p-4 rounded-lg shadow mb-4 sticky top-0 z-10">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                layout="vertical"
-                data={timelineData}
-                barSize={30}
-                margin={{ top: 20, right: 30, left: 120, bottom: 5 }}
-              >
-                <XAxis 
-                  type="number" 
-                  domain={[0, runData.completed_at - runData.started_at]}
-                  tickFormatter={(value) => formatDuration(value)}
-                />
-                <YAxis 
-                  dataKey="name" 
-                  type="category" 
-                  width={120}
-                />
-                <Tooltip content={<CustomTooltip />} />
-                <Bar 
-                  dataKey="duration"
-                  fill="#8884d8"
-                  background={{ fill: '#eee' }}
-                  onClick={(data) => scrollToStep(data.index)}
-                  // Precisely position each bar based on its start time from run start
-                  startPos={(data) => data.actualStart}
-                  barCategoryGap={0}
-                  barGap={0}
-                  shape={(props) => {
-                    const { x, y, width, height, fill, index } = props;
-                    const radius = 4;
-                    const duration = timelineData[index].durationLabel;
-                    
-                    return (
-                      <g>
-                        <rect
-                          x={x}
-                          y={y}
-                          width={width}
-                          height={height}
-                          fill={getBarColor(index)}
-                          rx={radius}
-                          ry={radius}
-                        />
-                        {/* Duration label - only show if bar is wide enough */}
-                        {width > 35 && (
-                          <text
-                            x={x + width / 2}
-                            y={y + height / 2}
-                            textAnchor="middle"
-                            dominantBaseline="middle"
-                            fill="white"
-                            fontWeight="bold"
-                            fontSize="12px"
-                          >
-                            {duration}
-                          </text>
-                        )}
-                      </g>
-                    );
-                  }}
-                />
-              </BarChart>
-            </ResponsiveContainer>
+            <WaterfallTimeline 
+              data={timelineData} 
+              runStart={runData.started_at}
+              runEnd={runData.completed_at}
+              onStepClick={scrollToStep}
+            />
           </div>
           
           {/* Split into separate containers - run summary and details */}
